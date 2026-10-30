@@ -71,7 +71,7 @@ if @mode != "prune" {
         const iso = formatDate(@photo['Date Taken'], "Custom", "yyyy-MM-dd'T'HH:mm:ssXXX")
         const row = "{@photo['Name']},{iso},{@photo['File Size'].number}"
     }
-    const joined = joinText(rows, "\n")
+    const joined = joinText(rows)
     const exportCSV = "name,date,size\n{joined}"
     saveFile("{OUT_DIR}/favorites_{LABEL}.csv", exportCSV, true)
     const finishedAt = currentDate()
@@ -104,7 +104,7 @@ if @mode != "export" {
         alert("No photos were selected out of {total}. Nothing to delete.", "photo-prune")
         stop()
     }
-    const prunedJoined = joinText(@victimRows, "\n")
+    const prunedJoined = joinText(@victimRows)
     const prunedCSV = "name,date,size\n{prunedJoined}"
     saveFile("{OUT_DIR}/pruned_{LABEL}_{stamp}.csv", prunedCSV, true)
 
