@@ -10,21 +10,17 @@
 
 // Keep LABEL in step with both Find Photos filters below: it names the export CSV that the prune guard checks.
 const LABEL = "pre2024_before-2025-01-01"
-const PRUNE_PERCENT = 50
-const LIMIT = 0
+const PRUNE_RATIO = 0.5
+const PRUNE_PERCENT = PRUNE_RATIO * 100
 const OUT_DIR = "photo-prune"
 const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
-
-const startedAt = currentDate()
-const stamp = formatDate(startedAt, "Custom", "yyyyMMdd'T'HHmmss")
+const startedAt = formatDate(currentDate(), "Custom", "yyyyMMdd'T'HHmmss")
 
 menu "photo-prune: {LABEL}" {
-    item "Export CSV only":
+    item "Step 1: export CSV":
         @mode = "export"
-    item "Prune {PRUNE_PERCENT}% only":
+    item "Step 2: Prune {PRUNE_PERCENT}%":
         @mode = "prune"
-    item "Export, then prune {PRUNE_PERCENT}%":
-        @mode = "both"
 }
 
 // Repeat with Each over photos is quadratic even with an empty body, so everything here works on whole
@@ -69,64 +65,49 @@ const photos = rawAction("is.workflow.actions.filter.photos", {
 })
 const total = count(photos)
 
-if @mode != "prune" {
-    // LIMIT only trims the export, so a trial export stays smaller than total and the prune guard refuses it.
+if @mode == "export" {
     @exportPhotos = photos
-    if LIMIT > 0 {
-        @exportPhotos = getListItems(photos, 1, LIMIT)
-    }
     const names = splitText("{@exportPhotos['Name']}")
+    const extensions = splitText("{@exportPhotos['File Extension']}")
     const isoDates = formatDate(@exportPhotos['Date Taken'], "Custom", DATE_FORMAT)
     const dates = splitText("{isoDates}")
-    const sizes = splitText("{@exportPhotos['File Size'].number}")
+    const sizes = splitText("{@exportPhotos['File Size']}")
+    const bytes = splitText("{@exportPhotos['File Size'].number}")
     const rows = for name in names {
+        const extension = getListItem(extensions, RepeatIndex)
         const date = getListItem(dates, RepeatIndex)
         const size = getListItem(sizes, RepeatIndex)
-        const row = "{@name},{date},{size}"
+        const byte = getListItem(bytes, RepeatIndex)
+        const row = "{@name},{extension},{date},{size},{byte}"
     }
     const exportRowCount = count(rows)
     const joined = joinText(rows)
-    const exportCSV = "name,date,size\n{joined}"
+    const exportCSV = "name,extension,date taken,size,bytes\n{joined}"
     saveFile("{OUT_DIR}/favorites_{LABEL}.csv", exportCSV, true)
     const finishedAt = currentDate()
     const exportedAt = formatTime(finishedAt, "Medium")
     showNotification("Exported {exportRowCount} rows to {OUT_DIR}/favorites_{LABEL}.csv at {exportedAt}", "photo-prune")
 }
 
-if @mode != "export" {
-    // Prune repeatedly is allowed, so the current set may shrink, but must never exceed what was exported.
-    // The file may not be readable yet right after an export, so retry with backoff.
-    const exportPath = "{OUT_DIR}/favorites_{LABEL}.csv"
-    @exported = getFile(exportPath, nil, false)
-    @delay = 1
-    repeat attempt for 4 {
-        if !@exported {
-            wait(@delay)
-            @exported = getFile(exportPath, nil, false)
-            @delay *= 2
-        }
-    }
-    if !@exported {
-        alert("{OUT_DIR}/favorites_{LABEL}.csv not found. Run the export first.", "photo-prune")
-        stop()
-    }
-    const exportedLines = count(@exported, "Lines")
-    @exportedRows = exportedLines - 1
-    if total > @exportedRows {
-        alert("{total} photos match, but favorites_{LABEL}.csv has only {@exportedRows} rows. Re-run the export first.", "photo-prune")
+if @mode == "prune" {
+    alert("Choose the export file to check basic export consistency (total photo count). File is usually at iCloud Drive/Shortcuts/{OUT_DIR}/favorites_{LABEL}.csv.")
+    const exported = selectFile()
+    const exportedLines = count(exported, "Lines")
+    const exportedRows = exportedLines - 1
+    if total > exportedRows {
+        alert("{total} photos match, but {exported['Name']} has only {exportedRows} rows. Re-run the export first.", "photo-prune")
         stop()
     }
 
-    @victimTarget = total * PRUNE_PERCENT
-    @victimTarget /= 100
-    const victimLimit = round(@victimTarget)
-    if victimLimit == 0 {
+    const totalPrunable = total * PRUNE_RATIO
+    const pruneLimit = round(totalPrunable)
+    if pruneLimit == 0 {
         alert("{PRUNE_PERCENT}% of {total} photos rounds to 0. Nothing to delete.", "photo-prune")
         stop()
     }
 
     // Same filter as above, but randomly sorted and limited, so the selection itself is the random N% sample.
-    const victims = rawAction("is.workflow.actions.filter.photos", {
+    const pruned = rawAction("is.workflow.actions.filter.photos", {
         "WFContentItemFilter": {
             "Value": {
                 "WFActionParameterFilterPrefix": 1,
@@ -159,24 +140,29 @@ if @mode != "export" {
         },
         "WFContentItemSortProperty": "Random",
         "WFContentItemLimitEnabled": true,
-        "WFContentItemLimitNumber": "${victimLimit}"
+        "WFContentItemLimitNumber": "${pruneLimit}"
     })
-    const victimCount = count(victims)
+    const pruneCount = count(pruned)
 
-    const victimNames = splitText("{victims['Name']}")
-    const victimISODates = formatDate(victims['Date Taken'], "Custom", DATE_FORMAT)
-    const victimDates = splitText("{victimISODates}")
-    const victimSizes = splitText("{victims['File Size'].number}")
-    const victimRows = for victimName in victimNames {
-        const victimDate = getListItem(victimDates, RepeatIndex)
-        const victimSize = getListItem(victimSizes, RepeatIndex)
-        const victimRow = "{@victimName},{victimDate},{victimSize}"
+    const pNames = splitText("{pruned['Name']}")
+    const pExtensions = splitText("{pruned['File Extension']}")
+    const pIsoDates = formatDate(pruned['Date Taken'], "Custom", DATE_FORMAT)
+    const pDates = splitText("{pIsoDates}")
+    const pSizes = splitText("{pruned['File Size']}")
+    const pBytes = splitText("{pruned['File Size'].number}")
+    const pRows = for name in pNames {
+        const pExtension = getListItem(extensions, RepeatIndex)
+        const pDate = getListItem(dates, RepeatIndex)
+        const pSize = getListItem(sizes, RepeatIndex)
+        const pByte = getListItem(bytes, RepeatIndex)
+        const pRow = "{@name},{pExtension},{pDate},{pSize},{pByte}"
     }
-    const prunedJoined = joinText(victimRows)
-    const prunedCSV = "name,date,size\n{prunedJoined}"
-    saveFile("{OUT_DIR}/pruned_{LABEL}_{stamp}.csv", prunedCSV, true)
+    const pExportRowCount = count(pRows)
+    const pJoined = joinText(pRows)
+    const prunedCSV = "name,extension,date taken,size,bytes\n{pJoined}"
+    saveFile("{OUT_DIR}/pruned_{LABEL}_{startedAt}.csv", prunedCSV, true)
 
-    confirm("Delete {victimCount} of {total} photos ({PRUNE_PERCENT}% target)? The list was saved to {OUT_DIR}/pruned_{LABEL}_{stamp}.csv.", "photo-prune")
-    deletePhotos(victims)
-    alert("Deleted {victimCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+    confirm("Delete {pruneCount} of {total} photos ({PRUNE_PERCENT}% target)? The list was saved to {OUT_DIR}/pruned_{LABEL}_{startedAt}.csv.", "photo-prune")
+    deletePhotos(pruned)
+    alert("Deleted {pruneCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
