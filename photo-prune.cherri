@@ -4,14 +4,16 @@
 
 #include 'actions/calendar'
 #include 'actions/documents'
+#include 'actions/math'
 #include 'actions/photos'
 #include 'actions/text'
 
-// Keep LABEL in step with the Find Photos filter below: it names the export CSV that the prune guard checks.
+// Keep LABEL in step with both Find Photos filters below: it names the export CSV that the prune guard checks.
 const LABEL = "pre2024_before-2025-01-01"
 const PRUNE_PERCENT = 50
 const LIMIT = 0
 const OUT_DIR = "photo-prune"
+const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
 
 const startedAt = currentDate()
 const stamp = formatDate(startedAt, "Custom", "yyyyMMdd'T'HHmmss")
@@ -25,9 +27,13 @@ menu "photo-prune: {LABEL}" {
         @mode = "both"
 }
 
+// Repeat with Each over photos is quadratic even with an empty body, so everything here works on whole
+// collections: property access and Format Date on the collection give newline-separated columns, and only
+// the split text columns are looped over.
+
 // Requires the L3Sota/cherri fork: stock Cherri can't pass a serialized filter or plist dates through rawAction.
-// Values here are literal; Cherri constants and variables aren't resolved inside this block.
-@photos = rawAction("is.workflow.actions.filter.photos", {
+// Values inside WFContentItemFilter are literal; Cherri constants and variables aren't resolved there.
+const photos = rawAction("is.workflow.actions.filter.photos", {
     "WFContentItemFilter": {
         "Value": {
             "WFActionParameterFilterPrefix": 1,
@@ -61,54 +67,116 @@ menu "photo-prune: {LABEL}" {
     "WFContentItemSortOrder": "Oldest First",
     "WFContentItemSortProperty": "Date Taken"
 })
-if LIMIT > 0 {
-    @photos = getListItems(@photos, 1, LIMIT)
-}
-const total = count(@photos)
+const total = count(photos)
 
 if @mode != "prune" {
-    const rows = for photo in @photos {
-        const iso = formatDate(@photo['Date Taken'], "Custom", "yyyy-MM-dd'T'HH:mm:ssXXX")
-        const row = "{@photo['Name']},{iso},{@photo['File Size'].number}"
+    // LIMIT only trims the export, so a trial export stays smaller than total and the prune guard refuses it.
+    @exportPhotos = photos
+    if LIMIT > 0 {
+        @exportPhotos = getListItems(photos, 1, LIMIT)
     }
+    const names = splitText("{@exportPhotos['Name']}")
+    const isoDates = formatDate(@exportPhotos['Date Taken'], "Custom", DATE_FORMAT)
+    const dates = splitText("{isoDates}")
+    const sizes = splitText("{@exportPhotos['File Size'].number}")
+    const rows = for name in names {
+        const date = getListItem(dates, RepeatIndex)
+        const size = getListItem(sizes, RepeatIndex)
+        const row = "{@name},{date},{size}"
+    }
+    const exportRowCount = count(rows)
     const joined = joinText(rows)
     const exportCSV = "name,date,size\n{joined}"
     saveFile("{OUT_DIR}/favorites_{LABEL}.csv", exportCSV, true)
     const finishedAt = currentDate()
     const exportedAt = formatTime(finishedAt, "Medium")
-    showNotification("Exported {total} rows to {OUT_DIR}/favorites_{LABEL}.csv at {exportedAt}", "photo-prune")
+    showNotification("Exported {exportRowCount} rows to {OUT_DIR}/favorites_{LABEL}.csv at {exportedAt}", "photo-prune")
 }
 
 if @mode != "export" {
     // Prune repeatedly is allowed, so the current set may shrink, but must never exceed what was exported.
-    const exported = getFile("{OUT_DIR}/favorites_{LABEL}.csv")
-    const exportedLines = count(exported, "Lines")
+    // The file may not be readable yet right after an export, so retry with backoff.
+    const exportPath = "{OUT_DIR}/favorites_{LABEL}.csv"
+    @exported = getFile(exportPath, nil, false)
+    @delay = 1
+    repeat attempt for 4 {
+        if !@exported {
+            wait(@delay)
+            @exported = getFile(exportPath, nil, false)
+            @delay *= 2
+        }
+    }
+    if !@exported {
+        alert("{OUT_DIR}/favorites_{LABEL}.csv not found. Run the export first.", "photo-prune")
+        stop()
+    }
+    const exportedLines = count(@exported, "Lines")
     @exportedRows = exportedLines - 1
     if total > @exportedRows {
         alert("{total} photos match, but favorites_{LABEL}.csv has only {@exportedRows} rows. Re-run the export first.", "photo-prune")
         stop()
     }
 
-    @victims: array
-    @victimRows: array
-    for photo in @photos {
-        const roll = randomNumber(1, 100)
-        if roll <= PRUNE_PERCENT {
-            @victims += @photo
-            const victimISO = formatDate(@photo['Date Taken'], "Custom", "yyyy-MM-dd'T'HH:mm:ssXXX")
-            @victimRows += "{@photo['Name']},{victimISO},{@photo['File Size'].number}"
-        }
-    }
-    const victimCount = count(@victims)
-    if victimCount == 0 {
-        alert("No photos were selected out of {total}. Nothing to delete.", "photo-prune")
+    @victimTarget = total * PRUNE_PERCENT
+    @victimTarget /= 100
+    const victimLimit = round(@victimTarget)
+    if victimLimit == 0 {
+        alert("{PRUNE_PERCENT}% of {total} photos rounds to 0. Nothing to delete.", "photo-prune")
         stop()
     }
-    const prunedJoined = joinText(@victimRows)
+
+    // Same filter as above, but randomly sorted and limited, so the selection itself is the random N% sample.
+    const victims = rawAction("is.workflow.actions.filter.photos", {
+        "WFContentItemFilter": {
+            "Value": {
+                "WFActionParameterFilterPrefix": 1,
+                "WFActionParameterFilterTemplates": [
+                    {
+                        "Operator": 0,
+                        "Property": "Date Taken",
+                        "Removable": true,
+                        "Values": {
+                            "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                            "Unit": 4
+                        }
+                    },
+                    {
+                        "Operator": 4,
+                        "Property": "Album",
+                        "Removable": true,
+                        "Values": {
+                            "Enumeration": {
+                                "Value": "pre2024",
+                                "WFSerializationType": "WFStringSubstitutableState"
+                            },
+                            "Unit": 4
+                        }
+                    }
+                ],
+                "WFContentPredicateBoundedDate": false
+            },
+            "WFSerializationType": "WFContentPredicateTableTemplate"
+        },
+        "WFContentItemSortProperty": "Random",
+        "WFContentItemLimitEnabled": true,
+        "WFContentItemLimitNumber": "${victimLimit}"
+    })
+    const victimCount = count(victims)
+
+    const victimNames = splitText("{victims['Name']}")
+    const victimISODates = formatDate(victims['Date Taken'], "Custom", DATE_FORMAT)
+    const victimDates = splitText("{victimISODates}")
+    const victimSizes = splitText("{victims['File Size'].number}")
+    const victimRows = for victimName in victimNames {
+        const victimDate = getListItem(victimDates, RepeatIndex)
+        const victimSize = getListItem(victimSizes, RepeatIndex)
+        const victimRow = "{@victimName},{victimDate},{victimSize}"
+    }
+    const prunedJoined = joinText(victimRows)
     const prunedCSV = "name,date,size\n{prunedJoined}"
     saveFile("{OUT_DIR}/pruned_{LABEL}_{stamp}.csv", prunedCSV, true)
 
     confirm("Delete {victimCount} of {total} photos ({PRUNE_PERCENT}% target)? The list was saved to {OUT_DIR}/pruned_{LABEL}_{stamp}.csv.", "photo-prune")
-    deletePhotos(@victims)
+    deletePhotos(victims)
     alert("Deleted {victimCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
