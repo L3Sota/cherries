@@ -14,7 +14,8 @@ const PRUNE_RATIO = 0.5
 const PRUNE_PERCENT = PRUNE_RATIO * 100
 const OUT_DIR = "photo-prune"
 const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
-const startedAt = formatDate(currentDate(), "Custom", "yyyyMMdd'T'HHmmss")
+const now = currentDate()
+const startedAt = formatDate(now, "Custom", "yyyyMMdd'T'HHmmss")
 
 menu "photo-prune: {LABEL}" {
     item "Step 1: export CSV":
@@ -69,7 +70,7 @@ if @mode == "export" {
     @exportPhotos = photos
     const names = splitText("{@exportPhotos['Name']}")
     const extensions = splitText("{@exportPhotos['File Extension']}")
-    const isoDates = formatDate("@exportPhotos['Date Taken']", "Custom", DATE_FORMAT)
+    const isoDates = formatDate(@exportPhotos['Date Taken'], "Custom", DATE_FORMAT)
     const dates = splitText("{isoDates}")
     const sizes = splitText("{@exportPhotos['File Size']}")
     const bytes = splitText("{@exportPhotos['File Size'].number}")
@@ -151,10 +152,10 @@ if @mode == "prune" {
     const pSizes = splitText("{pruned['File Size']}")
     const pBytes = splitText("{pruned['File Size'].number}")
     const pRows = for name in pNames {
-        const pExtension = getListItem(extensions, RepeatIndex)
-        const pDate = getListItem(dates, RepeatIndex)
-        const pSize = getListItem(sizes, RepeatIndex)
-        const pByte = getListItem(bytes, RepeatIndex)
+        const pExtension = getListItem(pExtensions, RepeatIndex)
+        const pDate = getListItem(pDates, RepeatIndex)
+        const pSize = getListItem(pSizes, RepeatIndex)
+        const pByte = getListItem(pBytes, RepeatIndex)
         const pRow = "{@name},{pExtension},{pDate},{pSize},{pByte}"
     }
     const pExportRowCount = count(pRows)
