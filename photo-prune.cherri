@@ -8,11 +8,11 @@
 #include 'actions/photos'
 #include 'actions/text'
 
-// Keep LABEL in step with both Find Photos filters below: it names the export CSV that the prune guard checks.
+// Keep LABEL in step with all three Find Photos filters below: it names the export CSV that the prune guard checks.
 const LABEL = "before-2025-01-01"
 const PRUNE_RATIO = 0.5
 const PRUNE_PERCENT = PRUNE_RATIO * 100
-// Per-row cost grows with chunk size above 250 (1000: 36.3s, 500: 12.2s, 250: 5.2s, 100: 2.1s), and unchunked runs over ~4000 photos die.
+// Per-row cost grows with page size above 250 (1000: 36.3s, 500: 12.2s, 250: 5.2s, 100: 2.1s).
 const CHUNK = 250
 const OUT_DIR = "photo-prune"
 const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
@@ -26,12 +26,13 @@ menu "photo-prune: {LABEL}" {
         @mode = "prune"
 }
 
-// Repeat with Each over photos is quadratic even with an empty body, so everything here works on whole
-// collections: property access and Format Date on the collection give newline-separated columns, and only
-// the split text columns are looped over.
+// Repeat with Each over photos is quadratic even with an empty body, and building columns from a whole
+// ~4000-photo collection (or from ranges of one) dies, so photos are fetched by Find Photos in pages of CHUNK.
+// Each page's columns come from property access on the page, and only the split text columns are looped over.
 
 // Requires the L3Sota/cherri fork: stock Cherri can't pass a serialized filter or plist dates through rawAction.
-// Values inside WFContentItemFilter are literal; Cherri constants and variables aren't resolved there.
+// Values inside WFContentItemFilter are literal; Cherri constants and variables aren't resolved there, so the
+// page cursor is referenced as the named variable "cursor".
 const photos = rawAction("is.workflow.actions.filter.photos", {
     "WFContentItemFilter": {
         "Value": {
@@ -50,14 +51,13 @@ const photos = rawAction("is.workflow.actions.filter.photos", {
             "WFContentPredicateBoundedDate": false
         },
         "WFSerializationType": "WFContentPredicateTableTemplate"
-    },
-    "WFContentItemSortOrder": "Oldest First",
-    "WFContentItemSortProperty": "Date Taken"
+    }
 })
 const total = count(photos)
+@target: number
 
 if @mode == "export" {
-    @source = photos
+    @target = total
     @outPath = "{OUT_DIR}/favorites_{LABEL}.csv"
 }
 
@@ -77,77 +77,142 @@ if @mode == "prune" {
         alert("{PRUNE_PERCENT}% of {total} photos rounds to 0. Nothing to delete.", "photo-prune")
         stop()
     }
-
-    // Same filter as above, but randomly sorted and limited, so the selection itself is the random N% sample.
-    const pruned = rawAction("is.workflow.actions.filter.photos", {
-        "WFContentItemFilter": {
-            "Value": {
-                "WFActionParameterFilterPrefix": 1,
-                "WFActionParameterFilterTemplates": [
-                    {
-                        "Operator": 0,
-                        "Property": "Date Taken",
-                        "Removable": true,
-                        "Values": {
-                            "Date": {"$date": "2025-01-01T00:00:00+09:00"},
-                            "Unit": 4
-                        }
-                    }
-                ],
-                "WFContentPredicateBoundedDate": false
-            },
-            "WFSerializationType": "WFContentPredicateTableTemplate"
-        },
-        "WFContentItemSortProperty": "Random",
-        "WFContentItemLimitEnabled": true,
-        "WFContentItemLimitNumber": "${pruneLimit}"
-    })
-    @source = pruned
+    @target = pruneLimit
     @outPath = "{OUT_DIR}/pruned_{LABEL}_{startedAt}.csv"
+    confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? iOS asks to confirm each page. The list is saved to {@outPath} before each page is deleted.", "photo-prune")
 }
 
-// The CSV is built in memory and saved once, so a run that dies partway leaves no partial file behind.
-const sourceCount = count(@source)
-const chunkCountRaw = sourceCount / CHUNK
-const chunkCount = ceil(chunkCountRaw)
-const chunkCSVs = repeat c for chunkCount {
-    // Compound assignment with a constant operand (@x *= CHUNK) compiles to a plain set, so use binary expressions.
-    const previousChunks = @c - 1
-    const skipped = previousChunks * CHUNK
-    const start = skipped + 1
-    @end = skipped + CHUNK
-    if @end > sourceCount {
-        @end = sourceCount
+const pageCountRaw = @target / CHUNK
+const pageCount = ceil(pageCountRaw)
+@remaining: number
+@remaining = @target
+@cursor = date("1900-01-01")
+@parts: array
+repeat p for pageCount {
+    @pageLimit = CHUNK
+    if @remaining < CHUNK {
+        @pageLimit = @remaining
     }
-    const chunk = getListItems(@source, start, @end)
-    const names = splitText("{chunk['Name']}")
-    const extensions = splitText("{chunk['File Extension']}")
-    const isoDates = formatDate(chunk['Date Taken'], "Custom", DATE_FORMAT)
-    const dates = splitText("{isoDates}")
-    const bytes = splitText("{chunk['File Size'].number}")
-    const rowCount = count(names)
-    // A named index, since RepeatIndex inside this nested loop would be the outer chunk index.
-    const rows = repeat r for rowCount {
-        const name = getListItem(names, @r)
-        const extension = getListItem(extensions, @r)
-        const date = getListItem(dates, @r)
-        const byte = getListItem(bytes, @r)
-        const row = "{name},{extension},{date},{byte}"
+
+    if @mode == "export" {
+        // Keyset paging: Find Photos has a limit but no offset, so each page starts after the last page's Date Taken.
+        const sortedPage = rawAction("is.workflow.actions.filter.photos", {
+            "WFContentItemFilter": {
+                "Value": {
+                    "WFActionParameterFilterPrefix": 1,
+                    "WFActionParameterFilterTemplates": [
+                        {
+                            "Operator": 0,
+                            "Property": "Date Taken",
+                            "Removable": true,
+                            "Values": {
+                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                "Unit": 4
+                            }
+                        },
+                        {
+                            "Operator": 3,
+                            "Property": "Date Taken",
+                            "Removable": true,
+                            "Values": {
+                                "Date": {
+                                    "Value": {"Type": "Variable", "VariableName": "cursor"},
+                                    "WFSerializationType": "WFTextTokenAttachment"
+                                },
+                                "Unit": 4
+                            }
+                        }
+                    ],
+                    "WFContentPredicateBoundedDate": false
+                },
+                "WFSerializationType": "WFContentPredicateTableTemplate"
+            },
+            "WFContentItemSortOrder": "Oldest First",
+            "WFContentItemSortProperty": "Date Taken",
+            "WFContentItemLimitEnabled": true,
+            "WFContentItemLimitNumber": "${pageLimit}"
+        })
+        @page = sortedPage
     }
-    joinText(rows)
+
+    if @mode == "prune" {
+        // Deleted photos stop matching, so repeated random pages sample without replacement.
+        const randomPage = rawAction("is.workflow.actions.filter.photos", {
+            "WFContentItemFilter": {
+                "Value": {
+                    "WFActionParameterFilterPrefix": 1,
+                    "WFActionParameterFilterTemplates": [
+                        {
+                            "Operator": 0,
+                            "Property": "Date Taken",
+                            "Removable": true,
+                            "Values": {
+                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                "Unit": 4
+                            }
+                        }
+                    ],
+                    "WFContentPredicateBoundedDate": false
+                },
+                "WFSerializationType": "WFContentPredicateTableTemplate"
+            },
+            "WFContentItemSortProperty": "Random",
+            "WFContentItemLimitEnabled": true,
+            "WFContentItemLimitNumber": "${pageLimit}"
+        })
+        @page = randomPage
+    }
+
+    const pageSize = count(@page)
+    if pageSize > 0 {
+        const names = splitText("{@page['Name']}")
+        const extensions = splitText("{@page['File Extension']}")
+        const isoDates = formatDate(@page['Date Taken'], "Custom", DATE_FORMAT)
+        const dates = splitText("{isoDates}")
+        const bytes = splitText("{@page['File Size'].number}")
+        const rowCount = count(names)
+        // A named index, since RepeatIndex inside this nested loop would be the outer page index.
+        const rows = repeat r for rowCount {
+            const name = getListItem(names, @r)
+            const extension = getListItem(extensions, @r)
+            const date = getListItem(dates, @r)
+            const byte = getListItem(bytes, @r)
+            const row = "{name},{extension},{date},{byte}"
+        }
+        const pageCSV = joinText(rows)
+        @parts += pageCSV
+        @remaining = @remaining - pageSize
+
+        if @mode == "export" {
+            const lastPhoto = getLastItem(@page)
+            @cursor = lastPhoto['Date Taken']
+        }
+
+        if @mode == "prune" {
+            // Save before deleting, so the list always covers every photo already deleted if a later page fails.
+            const prunedSoFar = joinText(@parts)
+            const prunedCSV = "name,extension,date taken,bytes\n{prunedSoFar}"
+            saveFile(@outPath, prunedCSV, true)
+            deletePhotos(@page)
+        }
+    }
 }
-const joined = joinText(chunkCSVs)
-const csv = "name,extension,date taken,bytes\n{joined}"
-saveFile(@outPath, csv, true)
+const doneCount = @target - @remaining
 
 if @mode == "export" {
+    const joined = joinText(@parts)
+    const exportCSV = "name,extension,date taken,bytes\n{joined}"
+    saveFile(@outPath, exportCSV, true)
+    if doneCount < total {
+        // Photos sharing a Date Taken across a page boundary are skipped by the strict "is after" cursor.
+        alert("Exported only {doneCount} of {total} photos to {@outPath}. Some were skipped at page boundaries, so the prune guard will refuse this export.", "photo-prune")
+        stop()
+    }
     const finishedAt = currentDate()
     const exportedAt = formatTime(finishedAt, "Medium")
-    showNotification("Exported {sourceCount} rows to {@outPath} at {exportedAt}", "photo-prune")
+    showNotification("Exported {doneCount} rows to {@outPath} at {exportedAt}", "photo-prune")
 }
 
 if @mode == "prune" {
-    confirm("Delete {sourceCount} of {total} photos ({PRUNE_PERCENT}% target)? The list was saved to {@outPath}.", "photo-prune")
-    deletePhotos(@source)
-    alert("Deleted {sourceCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+    alert("Deleted {doneCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
