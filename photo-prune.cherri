@@ -9,9 +9,11 @@
 #include 'actions/text'
 
 // Keep LABEL in step with both Find Photos filters below: it names the export CSV that the prune guard checks.
-const LABEL = "pre2024_before-2025-01-01"
+const LABEL = "before-2025-01-01"
 const PRUNE_RATIO = 0.5
 const PRUNE_PERCENT = PRUNE_RATIO * 100
+// Per-row cost grows with chunk size above 250 (1000: 36.3s, 500: 12.2s, 250: 5.2s, 100: 2.1s), and unchunked runs over ~4000 photos die.
+const CHUNK = 250
 const OUT_DIR = "photo-prune"
 const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
 const now = currentDate()
@@ -43,18 +45,6 @@ const photos = rawAction("is.workflow.actions.filter.photos", {
                         "Date": {"$date": "2025-01-01T00:00:00+09:00"},
                         "Unit": 4
                     }
-                },
-                {
-                    "Operator": 4,
-                    "Property": "Album",
-                    "Removable": true,
-                    "Values": {
-                        "Enumeration": {
-                            "Value": "pre2024",
-                            "WFSerializationType": "WFStringSubstitutableState"
-                        },
-                        "Unit": 4
-                    }
                 }
             ],
             "WFContentPredicateBoundedDate": false
@@ -67,27 +57,8 @@ const photos = rawAction("is.workflow.actions.filter.photos", {
 const total = count(photos)
 
 if @mode == "export" {
-    @exportPhotos = photos
-    const names = splitText("{@exportPhotos['Name']}")
-    const extensions = splitText("{@exportPhotos['File Extension']}")
-    const isoDates = formatDate(@exportPhotos['Date Taken'], "Custom", DATE_FORMAT)
-    const dates = splitText("{isoDates}")
-    const sizes = splitText("{@exportPhotos['File Size']}")
-    const bytes = splitText("{@exportPhotos['File Size'].number}")
-    const rows = for name in names {
-        const extension = getListItem(extensions, RepeatIndex)
-        const date = getListItem(dates, RepeatIndex)
-        const size = getListItem(sizes, RepeatIndex)
-        const byte = getListItem(bytes, RepeatIndex)
-        const row = "{@name},{extension},{date},{size},{byte}"
-    }
-    const exportRowCount = count(rows)
-    const joined = joinText(rows)
-    const exportCSV = "name,extension,date taken,size,bytes\n{joined}"
-    saveFile("{OUT_DIR}/favorites_{LABEL}.csv", exportCSV, true)
-    const finishedAt = currentDate()
-    const exportedAt = formatTime(finishedAt, "Medium")
-    showNotification("Exported {exportRowCount} rows to {OUT_DIR}/favorites_{LABEL}.csv at {exportedAt}", "photo-prune")
+    @source = photos
+    @outPath = "{OUT_DIR}/favorites_{LABEL}.csv"
 }
 
 if @mode == "prune" {
@@ -121,18 +92,6 @@ if @mode == "prune" {
                             "Date": {"$date": "2025-01-01T00:00:00+09:00"},
                             "Unit": 4
                         }
-                    },
-                    {
-                        "Operator": 4,
-                        "Property": "Album",
-                        "Removable": true,
-                        "Values": {
-                            "Enumeration": {
-                                "Value": "pre2024",
-                                "WFSerializationType": "WFStringSubstitutableState"
-                            },
-                            "Unit": 4
-                        }
                     }
                 ],
                 "WFContentPredicateBoundedDate": false
@@ -143,27 +102,52 @@ if @mode == "prune" {
         "WFContentItemLimitEnabled": true,
         "WFContentItemLimitNumber": "${pruneLimit}"
     })
-    const pruneCount = count(pruned)
+    @source = pruned
+    @outPath = "{OUT_DIR}/pruned_{LABEL}_{startedAt}.csv"
+}
 
-    const pNames = splitText("{pruned['Name']}")
-    const pExtensions = splitText("{pruned['File Extension']}")
-    const pIsoDates = formatDate(pruned['Date Taken'], "Custom", DATE_FORMAT)
-    const pDates = splitText("{pIsoDates}")
-    const pSizes = splitText("{pruned['File Size']}")
-    const pBytes = splitText("{pruned['File Size'].number}")
-    const pRows = for name in pNames {
-        const pExtension = getListItem(pExtensions, RepeatIndex)
-        const pDate = getListItem(pDates, RepeatIndex)
-        const pSize = getListItem(pSizes, RepeatIndex)
-        const pByte = getListItem(pBytes, RepeatIndex)
-        const pRow = "{@name},{pExtension},{pDate},{pSize},{pByte}"
+// The CSV is built in memory and saved once, so a run that dies partway leaves no partial file behind.
+const sourceCount = count(@source)
+const chunkCountRaw = sourceCount / CHUNK
+const chunkCount = ceil(chunkCountRaw)
+const chunkCSVs = repeat c for chunkCount {
+    // Compound assignment with a constant operand (@x *= CHUNK) compiles to a plain set, so use binary expressions.
+    const previousChunks = @c - 1
+    const skipped = previousChunks * CHUNK
+    const start = skipped + 1
+    @end = skipped + CHUNK
+    if @end > sourceCount {
+        @end = sourceCount
     }
-    const pExportRowCount = count(pRows)
-    const pJoined = joinText(pRows)
-    const prunedCSV = "name,extension,date taken,size,bytes\n{pJoined}"
-    saveFile("{OUT_DIR}/pruned_{LABEL}_{startedAt}.csv", prunedCSV, true)
+    const chunk = getListItems(@source, start, @end)
+    const names = splitText("{chunk['Name']}")
+    const extensions = splitText("{chunk['File Extension']}")
+    const isoDates = formatDate(chunk['Date Taken'], "Custom", DATE_FORMAT)
+    const dates = splitText("{isoDates}")
+    const bytes = splitText("{chunk['File Size'].number}")
+    const rowCount = count(names)
+    // A named index, since RepeatIndex inside this nested loop would be the outer chunk index.
+    const rows = repeat r for rowCount {
+        const name = getListItem(names, @r)
+        const extension = getListItem(extensions, @r)
+        const date = getListItem(dates, @r)
+        const byte = getListItem(bytes, @r)
+        const row = "{name},{extension},{date},{byte}"
+    }
+    joinText(rows)
+}
+const joined = joinText(chunkCSVs)
+const csv = "name,extension,date taken,bytes\n{joined}"
+saveFile(@outPath, csv, true)
 
-    confirm("Delete {pruneCount} of {total} photos ({PRUNE_PERCENT}% target)? The list was saved to {OUT_DIR}/pruned_{LABEL}_{startedAt}.csv.", "photo-prune")
-    deletePhotos(pruned)
-    alert("Deleted {pruneCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+if @mode == "export" {
+    const finishedAt = currentDate()
+    const exportedAt = formatTime(finishedAt, "Medium")
+    showNotification("Exported {sourceCount} rows to {@outPath} at {exportedAt}", "photo-prune")
+}
+
+if @mode == "prune" {
+    confirm("Delete {sourceCount} of {total} photos ({PRUNE_PERCENT}% target)? The list was saved to {@outPath}.", "photo-prune")
+    deletePhotos(@source)
+    alert("Deleted {sourceCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
