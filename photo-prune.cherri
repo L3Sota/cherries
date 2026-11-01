@@ -69,7 +69,7 @@ if @mode == "export" {
     @exportPhotos = photos
     const names = splitText("{@exportPhotos['Name']}")
     const extensions = splitText("{@exportPhotos['File Extension']}")
-    const isoDates = formatDate(@exportPhotos['Date Taken'], "Custom", DATE_FORMAT)
+    const isoDates = formatDate("@exportPhotos['Date Taken']", "Custom", DATE_FORMAT)
     const dates = splitText("{isoDates}")
     const sizes = splitText("{@exportPhotos['File Size']}")
     const bytes = splitText("{@exportPhotos['File Size'].number}")
