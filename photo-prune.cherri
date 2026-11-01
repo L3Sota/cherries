@@ -58,16 +58,17 @@ const total = count(photos)
 
 if @mode == "export" {
     @target = total
-    @outPath = "{OUT_DIR}/favorites_{LABEL}.csv"
+    // A fresh folder per run, so a shorter re-export can't leave stale pages behind.
+    @outDir = "{OUT_DIR}/favorites_{LABEL}_{startedAt}"
 }
 
 if @mode == "prune" {
-    alert("Choose the export file to check basic export consistency (total photo count). File is usually at iCloud Drive/Shortcuts/{OUT_DIR}/favorites_{LABEL}.csv.")
-    const exported = selectFile()
-    const exportedLines = count(exported, "Lines")
-    const exportedRows = exportedLines - 1
+    alert("Choose manifest.txt in the latest export folder to check basic export consistency (total photo count). It is usually at iCloud Drive/Shortcuts/{OUT_DIR}/favorites_{LABEL}_<timestamp>/manifest.txt.")
+    const manifest = selectFile()
+    const manifestText = "{manifest}"
+    const exportedRows = number(manifestText)
     if total > exportedRows {
-        alert("{total} photos match, but {exported['Name']} has only {exportedRows} rows. Re-run the export first.", "photo-prune")
+        alert("{total} photos match, but the export only has {exportedRows} rows. Re-run the export first.", "photo-prune")
         stop()
     }
 
@@ -78,8 +79,8 @@ if @mode == "prune" {
         stop()
     }
     @target = pruneLimit
-    @outPath = "{OUT_DIR}/pruned_{LABEL}_{startedAt}.csv"
-    confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? iOS asks to confirm each page. The list is saved to {@outPath} before each page is deleted.", "photo-prune")
+    @outDir = "{OUT_DIR}/pruned_{LABEL}_{startedAt}"
+    confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? iOS asks to confirm each page. Each page's list is saved to {@outDir} before it is deleted.", "photo-prune")
 }
 
 const pageCountRaw = @target / CHUNK
@@ -87,7 +88,6 @@ const pageCount = ceil(pageCountRaw)
 @remaining: number
 @remaining = @target
 @cursor = date("1900-01-01")
-@parts: array
 repeat p for pageCount {
     @pageLimit = CHUNK
     if @remaining < CHUNK {
@@ -179,8 +179,11 @@ repeat p for pageCount {
             const byte = getListItem(bytes, @r)
             const row = "{name},{extension},{date},{byte}"
         }
-        const pageCSV = joinText(rows)
-        @parts += pageCSV
+        const joined = joinText(rows)
+        // One file per page: a single run-wide CSV carries every photo's provenance and dies when saved.
+        // In prune mode this also lands before the page is deleted, so the lists cover every deleted photo.
+        const pageCSV = "name,extension,date taken,bytes\n{joined}"
+        saveFile("{@outDir}/page-{@p}.csv", pageCSV, true)
         @remaining = @remaining - pageSize
 
         if @mode == "export" {
@@ -189,10 +192,6 @@ repeat p for pageCount {
         }
 
         if @mode == "prune" {
-            // Save before deleting, so the list always covers every photo already deleted if a later page fails.
-            const prunedSoFar = joinText(@parts)
-            const prunedCSV = "name,extension,date taken,bytes\n{prunedSoFar}"
-            saveFile(@outPath, prunedCSV, true)
             deletePhotos(@page)
         }
     }
@@ -200,17 +199,17 @@ repeat p for pageCount {
 const doneCount = @target - @remaining
 
 if @mode == "export" {
-    const joined = joinText(@parts)
-    const exportCSV = "name,extension,date taken,bytes\n{joined}"
-    saveFile(@outPath, exportCSV, true)
     if doneCount < total {
         // Photos sharing a Date Taken across a page boundary are skipped by the strict "is after" cursor.
-        alert("Exported only {doneCount} of {total} photos to {@outPath}. Some were skipped at page boundaries, so the prune guard will refuse this export.", "photo-prune")
+        alert("Exported only {doneCount} of {total} photos to {@outDir}. Some were skipped at page boundaries, so no manifest was written and the prune guard can't use this export.", "photo-prune")
         stop()
     }
+    // Written last, so a manifest only exists for a complete export.
+    const manifestCount = "{doneCount}"
+    saveFile("{@outDir}/manifest.txt", manifestCount, true)
     const finishedAt = currentDate()
     const exportedAt = formatTime(finishedAt, "Medium")
-    showNotification("Exported {doneCount} rows to {@outPath} at {exportedAt}", "photo-prune")
+    showNotification("Exported {doneCount} rows to {@outDir} at {exportedAt}", "photo-prune")
 }
 
 if @mode == "prune" {
