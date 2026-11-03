@@ -1,6 +1,7 @@
 #define name photo-prune
 #define color red
 #define glyph photoStack
+#define version 18
 
 #include 'actions/calendar'
 #include 'actions/documents'
@@ -112,25 +113,17 @@ repeat p for @maxPages {
         }
 
         if @mode == "export" {
-            // Find Photos has a limit but no offset, so pages are keyed on Date Taken. Its date filters compare
-            // whole days ("is after" a date includes that date from midnight), so each page covers whole days:
-            // the probe finds where CHUNK photos end, and the page stops before that day, which the next page starts on.
+            // Find Photos has a limit but no offset, so pages are keyed on Date Taken. iOS 18 has no "on or after"
+            // filter, but its "is in the range" includes the start day and stops before the end day, comparing whole
+            // days. So each page covers whole days: the probe finds where CHUNK photos end, and the page stops before
+            // that day, which the next page starts on.
             const probe = rawAction("is.workflow.actions.filter.photos", {
                 "WFContentItemFilter": {
                     "Value": {
                         "WFActionParameterFilterPrefix": 1,
                         "WFActionParameterFilterTemplates": [
                             {
-                                "Operator": 0,
-                                "Property": "Date Taken",
-                                "Removable": true,
-                                "Values": {
-                                    "Date": {"$date": "2025-01-01T00:00:00+09:00"},
-                                    "Unit": 4
-                                }
-                            },
-                            {
-                                "Operator": 3,
+                                "Operator": 1003,
                                 "Property": "Date Taken",
                                 "Removable": true,
                                 "Values": {
@@ -138,6 +131,7 @@ repeat p for @maxPages {
                                         "Value": {"Type": "Variable", "VariableName": "cursor"},
                                         "WFSerializationType": "WFTextTokenAttachment"
                                     },
+                                    "AnotherDate": {"$date": "2025-01-01T00:00:00+09:00"},
                                     "Unit": 4
                                 }
                             }
@@ -158,14 +152,15 @@ repeat p for @maxPages {
             } else {
                 const firstPhoto = getFirstItem(probe)
                 const lastPhoto = getLastItem(probe)
-                @lastTaken = lastPhoto['Date Taken']
                 const firstDay = formatDate(firstPhoto['Date Taken'], "Custom", "yyyy-MM-dd")
                 const lastDay = formatDate(lastPhoto['Date Taken'], "Custom", "yyyy-MM-dd")
-                @pageEnd = @lastTaken
+                // Bounds sit at midnight, so pages don't depend on whether the range compares days or timestamps.
+                const lastDayStart = date(lastDay)
+                @pageEnd = lastDayStart
                 // A single day with CHUNK or more photos becomes one oversized page, or paging would never move on.
                 if firstDay == lastDay {
                     const nextDay = rawAction("is.workflow.actions.adjustdate", {
-                        "WFDate": "${lastTaken}",
+                        "WFDate": "${pageEnd}",
                         "WFAdjustOperation": "Add",
                         "WFDuration": {
                             "Value": {"Magnitude": 1, "Unit": "days"},
@@ -180,16 +175,7 @@ repeat p for @maxPages {
                             "WFActionParameterFilterPrefix": 1,
                             "WFActionParameterFilterTemplates": [
                                 {
-                                    "Operator": 0,
-                                    "Property": "Date Taken",
-                                    "Removable": true,
-                                    "Values": {
-                                        "Date": {"$date": "2025-01-01T00:00:00+09:00"},
-                                        "Unit": 4
-                                    }
-                                },
-                                {
-                                    "Operator": 3,
+                                    "Operator": 1003,
                                     "Property": "Date Taken",
                                     "Removable": true,
                                     "Values": {
@@ -197,15 +183,7 @@ repeat p for @maxPages {
                                             "Value": {"Type": "Variable", "VariableName": "cursor"},
                                             "WFSerializationType": "WFTextTokenAttachment"
                                         },
-                                        "Unit": 4
-                                    }
-                                },
-                                {
-                                    "Operator": 0,
-                                    "Property": "Date Taken",
-                                    "Removable": true,
-                                    "Values": {
-                                        "Date": {
+                                        "AnotherDate": {
                                             "Value": {"Type": "Variable", "VariableName": "pageEnd"},
                                             "WFSerializationType": "WFTextTokenAttachment"
                                         },
