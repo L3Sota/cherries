@@ -8,7 +8,7 @@
 #include 'actions/photos'
 #include 'actions/text'
 
-// Keep LABEL in step with all three Find Photos filters below: it names the export CSV that the prune guard checks.
+// Keep LABEL in step with every Find Photos filter below: it names the export CSV that the prune guard checks.
 const LABEL = "before-2025-01-01"
 const PRUNE_RATIO = 0.5
 const PRUNE_PERCENT = PRUNE_RATIO * 100
@@ -56,8 +56,12 @@ const photos = rawAction("is.workflow.actions.filter.photos", {
 const total = count(photos)
 @target: number
 
+@maxPages: number
+
 if @mode == "export" {
     @target = total
+    // Export pages vary in size, so this is only an upper bound; the loop stops once a short page comes back.
+    @maxPages = total
     // A fresh folder per run, so a shorter re-export can't leave stale pages behind.
     @outDir = "{OUT_DIR}/favorites_{LABEL}_{startedAt}"
 }
@@ -86,128 +90,203 @@ if @mode == "prune" {
     }
     @target = pruneLimit
     @outDir = "{OUT_DIR}/pruned_{LABEL}_{startedAt}"
+    const pageCountRaw = pruneLimit / CHUNK
+    const pageCount = ceil(pageCountRaw)
+    @maxPages = pageCount
     confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? iOS asks to confirm each page. Each page's list is saved to {@outDir} before it is deleted.", "photo-prune")
 }
 
-const pageCountRaw = @target / CHUNK
-const pageCount = ceil(pageCountRaw)
 @remaining: number
 @remaining = @target
 @cursor = date("1900-01-01")
-repeat p for pageCount {
-    @pageLimit = CHUNK
-    if @remaining < CHUNK {
-        @pageLimit = @remaining
-    }
-
-    if @mode == "export" {
-        // Keyset paging: Find Photos has a limit but no offset, so each page starts after the last page's Date Taken.
-        const sortedPage = rawAction("is.workflow.actions.filter.photos", {
-            "WFContentItemFilter": {
-                "Value": {
-                    "WFActionParameterFilterPrefix": 1,
-                    "WFActionParameterFilterTemplates": [
-                        {
-                            "Operator": 0,
-                            "Property": "Date Taken",
-                            "Removable": true,
-                            "Values": {
-                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
-                                "Unit": 4
-                            }
-                        },
-                        {
-                            "Operator": 3,
-                            "Property": "Date Taken",
-                            "Removable": true,
-                            "Values": {
-                                "Date": {
-                                    "Value": {"Type": "Variable", "VariableName": "cursor"},
-                                    "WFSerializationType": "WFTextTokenAttachment"
-                                },
-                                "Unit": 4
-                            }
-                        }
-                    ],
-                    "WFContentPredicateBoundedDate": false
-                },
-                "WFSerializationType": "WFContentPredicateTableTemplate"
-            },
-            "WFContentItemSortOrder": "Oldest First",
-            "WFContentItemSortProperty": "Date Taken",
-            "WFContentItemLimitEnabled": true,
-            "WFContentItemLimitNumber": "${pageLimit}"
-        })
-        @page = sortedPage
-    }
-
-    if @mode == "prune" {
-        // Deleted photos stop matching, so repeated random pages sample without replacement.
-        const randomPage = rawAction("is.workflow.actions.filter.photos", {
-            "WFContentItemFilter": {
-                "Value": {
-                    "WFActionParameterFilterPrefix": 1,
-                    "WFActionParameterFilterTemplates": [
-                        {
-                            "Operator": 0,
-                            "Property": "Date Taken",
-                            "Removable": true,
-                            "Values": {
-                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
-                                "Unit": 4
-                            }
-                        }
-                    ],
-                    "WFContentPredicateBoundedDate": false
-                },
-                "WFSerializationType": "WFContentPredicateTableTemplate"
-            },
-            "WFContentItemSortProperty": "Random",
-            "WFContentItemLimitEnabled": true,
-            "WFContentItemLimitNumber": "${pageLimit}"
-        })
-        @page = randomPage
-    }
-
-    const pageSize = count(@page)
-    if pageSize > 0 {
-        const names = splitText("{@page['Name']}")
-        const extensions = splitText("{@page['File Extension']}")
-        const isoDates = formatDate(@page['Date Taken'], "Custom", DATE_FORMAT)
-        const dates = splitText("{isoDates}")
-        const bytes = splitText("{@page['File Size'].number}")
-        const rowCount = count(names)
-        // A named index, since RepeatIndex inside this nested loop would be the outer page index.
-        const rows = repeat r for rowCount {
-            const name = getListItem(names, @r)
-            const extension = getListItem(extensions, @r)
-            const date = getListItem(dates, @r)
-            const byte = getListItem(bytes, @r)
-            const row = "{name},{extension},{date},{byte}"
+@done: number
+@done = 0
+repeat p for @maxPages {
+    // Shortcuts has no break, so pages after the last one are skipped instead.
+    if @done == 0 {
+        @pageLimit = CHUNK
+        if @mode == "prune" {
+            if @remaining < CHUNK {
+                @pageLimit = @remaining
+            }
         }
-        const joined = joinText(rows)
-        // One file per page: a single run-wide CSV carries every photo's provenance and dies when saved.
-        // In prune mode this also lands before the page is deleted, so the lists cover every deleted photo.
-        const pageCSV = "name,extension,date taken,bytes\n{joined}"
-        saveFile("{@outDir}/page-{@p}.csv", pageCSV, true)
-        @remaining = @remaining - pageSize
 
         if @mode == "export" {
-            const lastPhoto = getLastItem(@page)
-            @cursor = lastPhoto['Date Taken']
+            // Find Photos has a limit but no offset, so pages are keyed on Date Taken. Its date filters compare
+            // whole days ("is after" a date includes that date from midnight), so each page covers whole days:
+            // the probe finds where CHUNK photos end, and the page stops before that day, which the next page starts on.
+            const probe = rawAction("is.workflow.actions.filter.photos", {
+                "WFContentItemFilter": {
+                    "Value": {
+                        "WFActionParameterFilterPrefix": 1,
+                        "WFActionParameterFilterTemplates": [
+                            {
+                                "Operator": 0,
+                                "Property": "Date Taken",
+                                "Removable": true,
+                                "Values": {
+                                    "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                    "Unit": 4
+                                }
+                            },
+                            {
+                                "Operator": 3,
+                                "Property": "Date Taken",
+                                "Removable": true,
+                                "Values": {
+                                    "Date": {
+                                        "Value": {"Type": "Variable", "VariableName": "cursor"},
+                                        "WFSerializationType": "WFTextTokenAttachment"
+                                    },
+                                    "Unit": 4
+                                }
+                            }
+                        ],
+                        "WFContentPredicateBoundedDate": false
+                    },
+                    "WFSerializationType": "WFContentPredicateTableTemplate"
+                },
+                "WFContentItemSortOrder": "Oldest First",
+                "WFContentItemSortProperty": "Date Taken",
+                "WFContentItemLimitEnabled": true,
+                "WFContentItemLimitNumber": "${pageLimit}"
+            })
+            const probeSize = count(probe)
+            if probeSize < CHUNK {
+                @page = probe
+                @done = 1
+            } else {
+                const firstPhoto = getFirstItem(probe)
+                const lastPhoto = getLastItem(probe)
+                @lastTaken = lastPhoto['Date Taken']
+                const firstDay = formatDate(firstPhoto['Date Taken'], "Custom", "yyyy-MM-dd")
+                const lastDay = formatDate(lastPhoto['Date Taken'], "Custom", "yyyy-MM-dd")
+                @pageEnd = @lastTaken
+                // A single day with CHUNK or more photos becomes one oversized page, or paging would never move on.
+                if firstDay == lastDay {
+                    const nextDay = rawAction("is.workflow.actions.adjustdate", {
+                        "WFDate": "${lastTaken}",
+                        "WFAdjustOperation": "Add",
+                        "WFDuration": {
+                            "Value": {"Magnitude": 1, "Unit": "days"},
+                            "WFSerializationType": "WFQuantityFieldValue"
+                        }
+                    })
+                    @pageEnd = nextDay
+                }
+                const dayPage = rawAction("is.workflow.actions.filter.photos", {
+                    "WFContentItemFilter": {
+                        "Value": {
+                            "WFActionParameterFilterPrefix": 1,
+                            "WFActionParameterFilterTemplates": [
+                                {
+                                    "Operator": 0,
+                                    "Property": "Date Taken",
+                                    "Removable": true,
+                                    "Values": {
+                                        "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                        "Unit": 4
+                                    }
+                                },
+                                {
+                                    "Operator": 3,
+                                    "Property": "Date Taken",
+                                    "Removable": true,
+                                    "Values": {
+                                        "Date": {
+                                            "Value": {"Type": "Variable", "VariableName": "cursor"},
+                                            "WFSerializationType": "WFTextTokenAttachment"
+                                        },
+                                        "Unit": 4
+                                    }
+                                },
+                                {
+                                    "Operator": 0,
+                                    "Property": "Date Taken",
+                                    "Removable": true,
+                                    "Values": {
+                                        "Date": {
+                                            "Value": {"Type": "Variable", "VariableName": "pageEnd"},
+                                            "WFSerializationType": "WFTextTokenAttachment"
+                                        },
+                                        "Unit": 4
+                                    }
+                                }
+                            ],
+                            "WFContentPredicateBoundedDate": false
+                        },
+                        "WFSerializationType": "WFContentPredicateTableTemplate"
+                    },
+                    "WFContentItemSortOrder": "Oldest First",
+                    "WFContentItemSortProperty": "Date Taken"
+                })
+                @page = dayPage
+                @cursor = @pageEnd
+            }
         }
 
         if @mode == "prune" {
-            deletePhotos(@page)
+            // Deleted photos stop matching, so repeated random pages sample without replacement.
+            const randomPage = rawAction("is.workflow.actions.filter.photos", {
+                "WFContentItemFilter": {
+                    "Value": {
+                        "WFActionParameterFilterPrefix": 1,
+                        "WFActionParameterFilterTemplates": [
+                            {
+                                "Operator": 0,
+                                "Property": "Date Taken",
+                                "Removable": true,
+                                "Values": {
+                                    "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                    "Unit": 4
+                                }
+                            }
+                        ],
+                        "WFContentPredicateBoundedDate": false
+                    },
+                    "WFSerializationType": "WFContentPredicateTableTemplate"
+                },
+                "WFContentItemSortProperty": "Random",
+                "WFContentItemLimitEnabled": true,
+                "WFContentItemLimitNumber": "${pageLimit}"
+            })
+            @page = randomPage
+        }
+
+        const pageSize = count(@page)
+        if pageSize > 0 {
+            const names = splitText("{@page['Name']}")
+            const extensions = splitText("{@page['File Extension']}")
+            const isoDates = formatDate(@page['Date Taken'], "Custom", DATE_FORMAT)
+            const dates = splitText("{isoDates}")
+            const bytes = splitText("{@page['File Size'].number}")
+            const rowCount = count(names)
+            // A named index, since RepeatIndex inside this nested loop would be the outer page index.
+            const rows = repeat r for rowCount {
+                const name = getListItem(names, @r)
+                const extension = getListItem(extensions, @r)
+                const date = getListItem(dates, @r)
+                const byte = getListItem(bytes, @r)
+                const row = "{name},{extension},{date},{byte}"
+            }
+            const joined = joinText(rows)
+            // One file per page: a single run-wide CSV carries every photo's provenance and dies when saved.
+            // In prune mode this also lands before the page is deleted, so the lists cover every deleted photo.
+            const pageCSV = "name,extension,date taken,bytes\n{joined}"
+            saveFile("{@outDir}/page-{@p}.csv", pageCSV, true)
+            @remaining = @remaining - pageSize
+
+            if @mode == "prune" {
+                deletePhotos(@page)
+            }
         }
     }
 }
 const doneCount = @target - @remaining
 
 if @mode == "export" {
-    if doneCount < total {
-        // Photos sharing a Date Taken across a page boundary are skipped by the strict "is after" cursor.
-        alert("Exported only {doneCount} of {total} photos to {@outDir}. Some were skipped at page boundaries, so the prune guard will refuse this export.", "photo-prune")
+    if doneCount != total {
+        alert("Exported {doneCount} rows to {@outDir}, but {total} photos match. Pages may have overlapped or missed a day, so check the export before pruning.", "photo-prune")
         stop()
     }
     const finishedAt = currentDate()
