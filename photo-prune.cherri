@@ -61,7 +61,6 @@ const photos = rawAction("is.workflow.actions.filter.photos", {
     }
 })
 const total = count(photos)
-@target: number
 
 @maxPages: number
 @pageNo: number
@@ -112,16 +111,15 @@ if @mode == "prune" {
         alert("{PRUNE_PERCENT}% of {total} photos rounds to 0. Nothing to delete.", "photo-prune")
         stop()
     }
-    @target = pruneLimit
+    @keep = total - pruneLimit
+    @left = total
     @outDir = "{OUT_DIR}/pruned_{LABEL}_{startedAt}"
     const pageCountRaw = pruneLimit / CHUNK
     const pageCount = ceil(pageCountRaw)
     @maxPages = pageCount
-    confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? iOS asks to confirm each page. Each page's list is saved to {@outDir} before it is deleted.", "photo-prune")
+    confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? Each page's list is saved to {@outDir} before it is deleted.", "photo-prune")
 }
 
-@remaining: number
-@remaining = @target
 @saved: number
 @done: number
 @done = 0
@@ -130,8 +128,9 @@ repeat p for @maxPages {
     if @done == 0 {
         @pageLimit = CHUNK
         if @mode == "prune" {
-            if @remaining < CHUNK {
-                @pageLimit = @remaining
+            const toGo = @left - @keep
+            if toGo < CHUNK {
+                @pageLimit = toGo
             }
         }
 
@@ -220,7 +219,7 @@ repeat p for @maxPages {
         }
 
         if @mode == "prune" {
-            // Deleted photos stop matching, so repeated random pages sample without replacement.
+            // Deleted photos stop matching once their deletion lands, so random pages sample without replacement.
             const randomPage = rawAction("is.workflow.actions.filter.photos", {
                 "WFContentItemFilter": {
                     "Value": {
@@ -270,10 +269,52 @@ repeat p for @maxPages {
             saveFile("{@outDir}/page-{@pageNo}.csv", pageCSV, true)
             @pageNo = @pageNo + 1
             @saved = @saved + pageSize
-            @remaining = @remaining - pageSize
 
             if @mode == "prune" {
                 deletePhotos(@page)
+                // Delete Photos returns before its deletion lands, and the next page's deletion or the end of the run
+                // cuts it short, leaving photos that later random pages pick again. So wait for the count to drop.
+                const expectedLeft = @left - pageSize
+                @landed = 0
+                repeat w for 24 {
+                    if @landed == 0 {
+                        wait(5)
+                        const leftPhotos = rawAction("is.workflow.actions.filter.photos", {
+                            "WFContentItemFilter": {
+                                "Value": {
+                                    "WFActionParameterFilterPrefix": 1,
+                                    "WFActionParameterFilterTemplates": [
+                                        {
+                                            "Operator": 0,
+                                            "Property": "Date Taken",
+                                            "Removable": true,
+                                            "Values": {
+                                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                                "Unit": 4
+                                            }
+                                        }
+                                    ],
+                                    "WFContentPredicateBoundedDate": false
+                                },
+                                "WFSerializationType": "WFContentPredicateTableTemplate"
+                            }
+                        })
+                        const leftNow = count(leftPhotos)
+                        @left = leftNow
+                        if leftNow <= expectedLeft {
+                            @landed = 1
+                        }
+                    }
+                }
+                if @landed == 0 {
+                    const deletedSoFar = total - @left
+                    alert("A page's deletion didn't finish within 2 minutes, so the run stopped. {deletedSoFar} of {total} photos are deleted and {@left} are left. Rows listed in {@outDir} may include photos that weren't deleted.", "photo-prune")
+                    stop()
+                }
+                const leftToGo = @left - @keep
+                if leftToGo <= 0 {
+                    @done = 1
+                }
             }
         }
     }
@@ -331,5 +372,6 @@ if @mode == "export" {
 }
 
 if @mode == "prune" {
-    showNotification("Deleted {@saved} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+    const deletedTotal = total - @left
+    showNotification("Deleted {deletedTotal} of {total} photos, listed in {@outDir}. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
