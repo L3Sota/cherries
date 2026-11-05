@@ -284,10 +284,10 @@ if @mode == "export" {
         // The cursor is the day the next page starts on, and every saved page is complete.
         const resumeFrom = formatDate(@cursor, "Custom", "yyyy-MM-dd")
         const resumeDetails = "folder: {@folderName}\nday: {resumeFrom}\npage: {@pageNo}"
-        // A menu rather than an alert, which can't offer a copy button.
+        // Set Clipboard fails on text derived from photos, so the details open in Quick Look to copy from there.
         menu "Saved {@saved} rows in {PAGES_PER_RUN} pages to {@outDir}. To continue, choose \"Step 1: resume export\" with\n{resumeDetails}" {
-            item "Copy resume details":
-                setClipboard(resumeDetails)
+            item "Show resume details to copy":
+                quicklook(resumeDetails)
             item "Done":
                 nothing()
         }
