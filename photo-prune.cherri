@@ -274,11 +274,14 @@ repeat p for @maxPages {
                 deletePhotos(@page)
                 // Delete Photos returns before its deletion lands, and the next page's deletion or the end of the run
                 // cuts it short, leaving photos that later random pages pick again. So wait for the count to drop.
+                // Find Photos errors when it runs while a deletion is still landing, and a page can take more than
+                // 5 seconds, so the first count waits 30.
                 const expectedLeft = @left - pageSize
                 @landed = 0
-                repeat w for 24 {
+                wait(20)
+                repeat w for 12 {
                     if @landed == 0 {
-                        wait(5)
+                        wait(10)
                         const leftPhotos = rawAction("is.workflow.actions.filter.photos", {
                             "WFContentItemFilter": {
                                 "Value": {
