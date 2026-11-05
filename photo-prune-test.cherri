@@ -1,0 +1,383 @@
+#define name photo-prune-test
+#define color red
+#define glyph photoStack
+#define version 18
+
+#include 'actions/calendar'
+#include 'actions/documents'
+#include 'actions/math'
+#include 'actions/photos'
+#include 'actions/sharing'
+#include 'actions/text'
+
+// Keep LABEL in step with every Find Photos filter below: it names the export CSV that the prune guard checks.
+const LABEL = "before-2025-01-01"
+const PRUNE_RATIO = 0.1
+const PRUNE_PERCENT = PRUNE_RATIO * 100
+// Per-row cost grows with page size above 250 (1000: 36.3s, 500: 12.2s, 250: 5.2s, 100: 2.1s).
+const CHUNK = 250
+// Long runs die partway through a large library (about 32 pages in on the iOS 18 target), so an export run
+// stops after this many pages and says how to resume.
+const PAGES_PER_RUN = 30
+const OUT_DIR = "photo-prune-test"
+const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
+const now = currentDate()
+const startedAt = formatDate(now, "Custom", "yyyyMMdd'T'HHmmss")
+
+menu "photo-prune: {LABEL}" {
+    item "Step 1: export CSV":
+        @mode = "export"
+    item "Step 1: resume export":
+        @mode = "resume"
+    item "Step 2: Prune {PRUNE_PERCENT}%":
+        @mode = "prune"
+}
+
+// Repeat with Each over photos is quadratic even with an empty body, and building columns from a whole
+// ~4000-photo collection (or from ranges of one) dies, so photos are fetched by Find Photos in pages of CHUNK.
+// Each page's columns come from property access on the page, and only the split text columns are looped over.
+
+// Requires the L3Sota/cherri fork: stock Cherri can't pass a serialized filter or plist dates through rawAction.
+// Values inside WFContentItemFilter are literal; Cherri constants and variables aren't resolved there, so the
+// page cursor is referenced as the named variable "cursor".
+const photos = rawAction("is.workflow.actions.filter.photos", {
+    "WFContentItemFilter": {
+        "Value": {
+            "WFActionParameterFilterPrefix": 1,
+            "WFActionParameterFilterTemplates": [
+                {
+                    "Operator": 0,
+                    "Property": "Date Taken",
+                    "Removable": true,
+                    "Values": {
+                        "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                        "Unit": 4
+                    }
+                }
+            ],
+            "WFContentPredicateBoundedDate": false
+        },
+        "WFSerializationType": "WFContentPredicateTableTemplate"
+    }
+})
+const total = count(photos)
+
+@maxPages: number
+@pageNo: number
+@pageNo = 1
+@cursor = date("1900-01-01")
+// A fresh folder per export, so a shorter re-export can't leave stale pages behind.
+@folderName = "favorites_{LABEL}_{startedAt}"
+
+if @mode == "resume" {
+    // A run that crashed may have left its last page half written, so resume from the day after the
+    // second-to-last page's last row, as the last page's number: the last page is redone and overwritten.
+    const resumeFolder = prompt("Export folder to continue, as named in Shortcuts/{OUT_DIR}")
+    const resumeDay = prompt("First day to export. After a crash, the day after the second-to-last page's last row.", "Date")
+    const resumePage = prompt("Page number to save it as. After a crash, the last page's number.", "Number")
+    const resumeDayText = formatDate(resumeDay, "Custom", "yyyy-MM-dd")
+    const resumeDayStart = date(resumeDayText)
+    @folderName = resumeFolder
+    @cursor = resumeDayStart
+    @pageNo = resumePage
+    @mode = "export"
+}
+@runStart = @cursor
+
+if @mode == "export" {
+    @maxPages = PAGES_PER_RUN
+    @outDir = "{OUT_DIR}/{@folderName}"
+}
+
+if @mode == "prune" {
+    alert("Select all page-*.csv files in the latest export folder to check basic export consistency (total photo count). They are usually in iCloud Drive/Shortcuts/{OUT_DIR}/favorites_{LABEL}_<timestamp>/.")
+    // Rows are counted from the saved pages: a single saved count derived from every photo carries every
+    // photo's provenance, and saving it dies like the run-wide CSV did. Missing pages come up short here.
+    const pageFiles = selectFile(true)
+    @exportedRows: number
+    for pageFile in pageFiles {
+        const pageLines = count(@pageFile, "Lines")
+        const pageRows = pageLines - 1
+        @exportedRows = @exportedRows + pageRows
+    }
+    if total > @exportedRows {
+        alert("{total} photos match, but the selected pages only have {@exportedRows} rows. Select every page, or re-run the export.", "photo-prune")
+        stop()
+    }
+
+    const totalPrunable = total * PRUNE_RATIO
+    const pruneLimit = round(totalPrunable)
+    if pruneLimit == 0 {
+        alert("{PRUNE_PERCENT}% of {total} photos rounds to 0. Nothing to delete.", "photo-prune")
+        stop()
+    }
+    @keep = total - pruneLimit
+    @left = total
+    @outDir = "{OUT_DIR}/pruned_{LABEL}_{startedAt}"
+    const pageCountRaw = pruneLimit / CHUNK
+    const pageCount = ceil(pageCountRaw)
+    @maxPages = pageCount
+    confirm("Delete {pruneLimit} of {total} photos ({PRUNE_PERCENT}%) in random pages of {CHUNK}? Each page's list is saved to {@outDir} before it is deleted.", "photo-prune")
+}
+
+@saved: number
+@done: number
+@done = 0
+repeat p for @maxPages {
+    // Shortcuts has no break, so pages after the last one are skipped instead.
+    if @done == 0 {
+        @pageLimit = CHUNK
+        if @mode == "prune" {
+            const toGo = @left - @keep
+            if toGo < CHUNK {
+                @pageLimit = toGo
+            }
+        }
+
+        if @mode == "export" {
+            // Find Photos has a limit but no offset, so pages are keyed on Date Taken. iOS 18 has no "on or after"
+            // filter, but its "is in the range" includes the start day and stops before the end day, comparing whole
+            // days. So each page covers whole days: the probe finds where CHUNK photos end, and the page stops before
+            // that day, which the next page starts on.
+            const probe = rawAction("is.workflow.actions.filter.photos", {
+                "WFContentItemFilter": {
+                    "Value": {
+                        "WFActionParameterFilterPrefix": 1,
+                        "WFActionParameterFilterTemplates": [
+                            {
+                                "Operator": 1003,
+                                "Property": "Date Taken",
+                                "Removable": true,
+                                "Values": {
+                                    "Date": {
+                                        "Value": {"Type": "Variable", "VariableName": "cursor"},
+                                        "WFSerializationType": "WFTextTokenAttachment"
+                                    },
+                                    "AnotherDate": {"$date": "2025-01-01T00:00:00+09:00"},
+                                    "Unit": 4
+                                }
+                            }
+                        ],
+                        "WFContentPredicateBoundedDate": false
+                    },
+                    "WFSerializationType": "WFContentPredicateTableTemplate"
+                },
+                "WFContentItemSortOrder": "Oldest First",
+                "WFContentItemSortProperty": "Date Taken",
+                "WFContentItemLimitEnabled": true,
+                "WFContentItemLimitNumber": "${pageLimit}"
+            })
+            const probeSize = count(probe)
+            if probeSize < CHUNK {
+                @page = probe
+                @done = 1
+            } else {
+                const firstPhoto = getFirstItem(probe)
+                const lastPhoto = getLastItem(probe)
+                const firstDay = formatDate(firstPhoto['Date Taken'], "Custom", "yyyy-MM-dd")
+                const lastDay = formatDate(lastPhoto['Date Taken'], "Custom", "yyyy-MM-dd")
+                // Bounds sit at midnight, so pages don't depend on whether the range compares days or timestamps.
+                const lastDayStart = date(lastDay)
+                @pageEnd = lastDayStart
+                // A single day with CHUNK or more photos becomes one oversized page, or paging would never move on.
+                if firstDay == lastDay {
+                    const nextDay = adjustDate(lastDayStart, "Add", qty(1, "days"))
+                    @pageEnd = nextDay
+                }
+                const dayPage = rawAction("is.workflow.actions.filter.photos", {
+                    "WFContentItemFilter": {
+                        "Value": {
+                            "WFActionParameterFilterPrefix": 1,
+                            "WFActionParameterFilterTemplates": [
+                                {
+                                    "Operator": 1003,
+                                    "Property": "Date Taken",
+                                    "Removable": true,
+                                    "Values": {
+                                        "Date": {
+                                            "Value": {"Type": "Variable", "VariableName": "cursor"},
+                                            "WFSerializationType": "WFTextTokenAttachment"
+                                        },
+                                        "AnotherDate": {
+                                            "Value": {"Type": "Variable", "VariableName": "pageEnd"},
+                                            "WFSerializationType": "WFTextTokenAttachment"
+                                        },
+                                        "Unit": 4
+                                    }
+                                }
+                            ],
+                            "WFContentPredicateBoundedDate": false
+                        },
+                        "WFSerializationType": "WFContentPredicateTableTemplate"
+                    },
+                    "WFContentItemSortOrder": "Oldest First",
+                    "WFContentItemSortProperty": "Date Taken"
+                })
+                @page = dayPage
+                @cursor = @pageEnd
+            }
+        }
+
+        if @mode == "prune" {
+            showNotification("page {@pageNo}: finding", "trace")
+            // Deleted photos stop matching once their deletion lands, so random pages sample without replacement.
+            const randomPage = rawAction("is.workflow.actions.filter.photos", {
+                "WFContentItemFilter": {
+                    "Value": {
+                        "WFActionParameterFilterPrefix": 1,
+                        "WFActionParameterFilterTemplates": [
+                            {
+                                "Operator": 0,
+                                "Property": "Date Taken",
+                                "Removable": true,
+                                "Values": {
+                                    "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                    "Unit": 4
+                                }
+                            }
+                        ],
+                        "WFContentPredicateBoundedDate": false
+                    },
+                    "WFSerializationType": "WFContentPredicateTableTemplate"
+                },
+                "WFContentItemSortProperty": "Random",
+                "WFContentItemLimitEnabled": true,
+                "WFContentItemLimitNumber": "${pageLimit}"
+            })
+            @page = randomPage
+            showNotification("page {@pageNo}: found", "trace")
+        }
+
+        const pageSize = count(@page)
+        if pageSize > 0 {
+            const names = splitText("{@page['Name']}")
+            const extensions = splitText("{@page['File Extension']}")
+            const isoDates = formatDate(@page['Date Taken'], "Custom", DATE_FORMAT)
+            const dates = splitText("{isoDates}")
+            const bytes = splitText("{@page['File Size'].number}")
+            const rowCount = count(names)
+            // A named index, since RepeatIndex inside this nested loop would be the outer page index.
+            const rows = repeat r for rowCount {
+                const name = getListItem(names, @r)
+                const extension = getListItem(extensions, @r)
+                const date = getListItem(dates, @r)
+                const byte = getListItem(bytes, @r)
+                const row = "{name},{extension},{date},{byte}"
+            }
+            const joined = joinText(rows)
+            // One file per page: a single run-wide CSV carries every photo's provenance and dies when saved.
+            // In prune mode this also lands before the page is deleted, so the lists cover every deleted photo.
+            const pageCSV = "name,extension,date taken,bytes\n{joined}"
+            saveFile("{@outDir}/page-{@pageNo}.csv", pageCSV, true)
+            @pageNo = @pageNo + 1
+            @saved = @saved + pageSize
+
+            if @mode == "prune" {
+                showNotification("page {@pageNo}: deleting", "trace")
+                deletePhotos(@page)
+                showNotification("page {@pageNo}: delete returned", "trace")
+                // Delete Photos returns before its deletion lands, and the next page's deletion or the end of the run
+                // cuts it short, leaving photos that later random pages pick again. So wait for the count to drop.
+                const expectedLeft = @left - pageSize
+                @landed = 0
+                repeat w for 24 {
+                    if @landed == 0 {
+                        wait(5)
+                        showNotification("page {@pageNo}: poll {@w} counting", "trace")
+                        const leftPhotos = rawAction("is.workflow.actions.filter.photos", {
+                            "WFContentItemFilter": {
+                                "Value": {
+                                    "WFActionParameterFilterPrefix": 1,
+                                    "WFActionParameterFilterTemplates": [
+                                        {
+                                            "Operator": 0,
+                                            "Property": "Date Taken",
+                                            "Removable": true,
+                                            "Values": {
+                                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                                "Unit": 4
+                                            }
+                                        }
+                                    ],
+                                    "WFContentPredicateBoundedDate": false
+                                },
+                                "WFSerializationType": "WFContentPredicateTableTemplate"
+                            }
+                        })
+                        const leftNow = count(leftPhotos)
+                        @left = leftNow
+                        showNotification("page {@pageNo}: poll {@w} count {leftNow}, want {expectedLeft}", "trace")
+                        if leftNow <= expectedLeft {
+                            @landed = 1
+                        }
+                    }
+                }
+                if @landed == 0 {
+                    const deletedSoFar = total - @left
+                    alert("A page's deletion didn't finish within 2 minutes, so the run stopped. {deletedSoFar} of {total} photos are deleted and {@left} are left. Rows listed in {@outDir} may include photos that weren't deleted.", "photo-prune")
+                    stop()
+                }
+                const leftToGo = @left - @keep
+                if leftToGo <= 0 {
+                    @done = 1
+                }
+            }
+        }
+    }
+}
+
+if @mode == "export" {
+    if @done == 0 {
+        // The cursor is the day the next page starts on, and every saved page is complete.
+        const resumeFrom = formatDate(@cursor, "Custom", "yyyy-MM-dd")
+        const resumeDetails = "folder: {@folderName}\nday: {resumeFrom}\npage: {@pageNo}"
+        // The menu is gone once dismissed, so the details also stay in Notification Center.
+        showNotification("Saved {@saved} rows in {PAGES_PER_RUN} pages. To continue, resume export with\n{resumeDetails}", "photo-prune")
+        // Set Clipboard fails on text derived from photos, so the details open in Quick Look to copy from there.
+        menu "Saved {@saved} rows in {PAGES_PER_RUN} pages to {@outDir}. To continue, choose \"Step 1: resume export\" with\n{resumeDetails}" {
+            item "Show resume details to copy":
+                quicklook(resumeDetails)
+            item "Done":
+                nothing()
+        }
+        stop()
+    }
+    // Counted from this run's first day, so a resumed run checks only the pages it saved.
+    const runPhotos = rawAction("is.workflow.actions.filter.photos", {
+        "WFContentItemFilter": {
+            "Value": {
+                "WFActionParameterFilterPrefix": 1,
+                "WFActionParameterFilterTemplates": [
+                    {
+                        "Operator": 1003,
+                        "Property": "Date Taken",
+                        "Removable": true,
+                        "Values": {
+                            "Date": {
+                                "Value": {"Type": "Variable", "VariableName": "runStart"},
+                                "WFSerializationType": "WFTextTokenAttachment"
+                            },
+                            "AnotherDate": {"$date": "2025-01-01T00:00:00+09:00"},
+                            "Unit": 4
+                        }
+                    }
+                ],
+                "WFContentPredicateBoundedDate": false
+            },
+            "WFSerializationType": "WFContentPredicateTableTemplate"
+        }
+    })
+    const runTotal = count(runPhotos)
+    if @saved != runTotal {
+        alert("Saved {@saved} rows to {@outDir}, but {runTotal} photos match from this run's first day. Pages may have overlapped or missed a day, so check the export before pruning.", "photo-prune")
+        stop()
+    }
+    const finishedAt = currentDate()
+    const exportedAt = formatTime(finishedAt, "Medium")
+    showNotification("Exported {@saved} rows to {@outDir} at {exportedAt}. Select every page in the folder when pruning.", "photo-prune")
+}
+
+if @mode == "prune" {
+    const deletedTotal = total - @left
+    showNotification("Deleted {deletedTotal} of {total} photos, listed in {@outDir}. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+}
