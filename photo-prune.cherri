@@ -92,7 +92,7 @@ if @mode == "export" {
 if @mode == "prune" {
     alert("Select all page-*.csv files in the latest export folder to check basic export consistency (total photo count). They are usually in iCloud Drive/Shortcuts/{OUT_DIR}/favorites_{LABEL}_<timestamp>/.")
     // Rows are counted from the saved pages: a single saved count derived from every photo carries every
-    // photo's provenance, and saving it dies like the run-wide CSV did. Missing pages come up short here.
+    // photo's provenance, and saving it dies like the run-wide CSV did.
     const pageFiles = selectFile(true)
     @exportedRows: number
     for pageFile in pageFiles {
@@ -100,8 +100,9 @@ if @mode == "prune" {
         const pageRows = pageLines - 1
         @exportedRows = @exportedRows + pageRows
     }
-    if total > @exportedRows {
-        alert("{total} photos match, but the selected pages only have {@exportedRows} rows. Select every page, or re-run the export.", "photo-prune")
+    // Not just "fewer rows": an export from before photos were deleted or restored has more rows than match now.
+    if total != @exportedRows {
+        alert("{total} photos match, but the selected pages have {@exportedRows} rows. Select every page of an export made since the library last changed, or re-run the export.", "photo-prune")
         stop()
     }
 
