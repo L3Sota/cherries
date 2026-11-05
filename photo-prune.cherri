@@ -15,6 +15,9 @@ const PRUNE_RATIO = 0.5
 const PRUNE_PERCENT = PRUNE_RATIO * 100
 // Per-row cost grows with page size above 250 (1000: 36.3s, 500: 12.2s, 250: 5.2s, 100: 2.1s).
 const CHUNK = 250
+// Long runs die partway through a large library (about 32 pages in on the iOS 18 target), so an export run
+// stops after this many pages and says how to resume.
+const PAGES_PER_RUN = 30
 const OUT_DIR = "photo-prune"
 const DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssXXX"
 const now = currentDate()
@@ -23,6 +26,8 @@ const startedAt = formatDate(now, "Custom", "yyyyMMdd'T'HHmmss")
 menu "photo-prune: {LABEL}" {
     item "Step 1: export CSV":
         @mode = "export"
+    item "Step 1: resume export":
+        @mode = "resume"
     item "Step 2: Prune {PRUNE_PERCENT}%":
         @mode = "prune"
 }
@@ -58,13 +63,30 @@ const total = count(photos)
 @target: number
 
 @maxPages: number
+@pageNo: number
+@pageNo = 1
+@cursor = date("1900-01-01")
+// A fresh folder per export, so a shorter re-export can't leave stale pages behind.
+@folderName = "favorites_{LABEL}_{startedAt}"
+
+if @mode == "resume" {
+    // A run that crashed may have left its last page half written, so resume from the day after the
+    // second-to-last page's last row, as the last page's number: the last page is redone and overwritten.
+    const resumeFolder = prompt("Export folder to continue, as named in Shortcuts/{OUT_DIR}")
+    const resumeDay = prompt("First day to export. After a crash, the day after the second-to-last page's last row.", "Date")
+    const resumePage = prompt("Page number to save it as. After a crash, the last page's number.", "Number")
+    const resumeDayText = formatDate(resumeDay, "Custom", "yyyy-MM-dd")
+    const resumeDayStart = date(resumeDayText)
+    @folderName = resumeFolder
+    @cursor = resumeDayStart
+    @pageNo = resumePage
+    @mode = "export"
+}
+@runStart = @cursor
 
 if @mode == "export" {
-    @target = total
-    // Export pages vary in size, so this is only an upper bound; the loop stops once a short page comes back.
-    @maxPages = total
-    // A fresh folder per run, so a shorter re-export can't leave stale pages behind.
-    @outDir = "{OUT_DIR}/favorites_{LABEL}_{startedAt}"
+    @maxPages = PAGES_PER_RUN
+    @outDir = "{OUT_DIR}/{@folderName}"
 }
 
 if @mode == "prune" {
@@ -99,7 +121,7 @@ if @mode == "prune" {
 
 @remaining: number
 @remaining = @target
-@cursor = date("1900-01-01")
+@saved: number
 @done: number
 @done = 0
 repeat p for @maxPages {
@@ -244,7 +266,9 @@ repeat p for @maxPages {
             // One file per page: a single run-wide CSV carries every photo's provenance and dies when saved.
             // In prune mode this also lands before the page is deleted, so the lists cover every deleted photo.
             const pageCSV = "name,extension,date taken,bytes\n{joined}"
-            saveFile("{@outDir}/page-{@p}.csv", pageCSV, true)
+            saveFile("{@outDir}/page-{@pageNo}.csv", pageCSV, true)
+            @pageNo = @pageNo + 1
+            @saved = @saved + pageSize
             @remaining = @remaining - pageSize
 
             if @mode == "prune" {
@@ -253,18 +277,49 @@ repeat p for @maxPages {
         }
     }
 }
-const doneCount = @target - @remaining
 
 if @mode == "export" {
-    if doneCount != total {
-        alert("Exported {doneCount} rows to {@outDir}, but {total} photos match. Pages may have overlapped or missed a day, so check the export before pruning.", "photo-prune")
+    if @done == 0 {
+        // The cursor is the day the next page starts on, and every saved page is complete.
+        const resumeFrom = formatDate(@cursor, "Custom", "yyyy-MM-dd")
+        alert("Saved {@saved} rows in {PAGES_PER_RUN} pages to {@outDir}. To continue, choose \"Step 1: resume export\" with folder {@folderName}, day {resumeFrom}, and page {@pageNo}.", "photo-prune")
+        stop()
+    }
+    // Counted from this run's first day, so a resumed run checks only the pages it saved.
+    const runPhotos = rawAction("is.workflow.actions.filter.photos", {
+        "WFContentItemFilter": {
+            "Value": {
+                "WFActionParameterFilterPrefix": 1,
+                "WFActionParameterFilterTemplates": [
+                    {
+                        "Operator": 1003,
+                        "Property": "Date Taken",
+                        "Removable": true,
+                        "Values": {
+                            "Date": {
+                                "Value": {"Type": "Variable", "VariableName": "runStart"},
+                                "WFSerializationType": "WFTextTokenAttachment"
+                            },
+                            "AnotherDate": {"$date": "2025-01-01T00:00:00+09:00"},
+                            "Unit": 4
+                        }
+                    }
+                ],
+                "WFContentPredicateBoundedDate": false
+            },
+            "WFSerializationType": "WFContentPredicateTableTemplate"
+        }
+    })
+    const runTotal = count(runPhotos)
+    if @saved != runTotal {
+        alert("Saved {@saved} rows to {@outDir}, but {runTotal} photos match from this run's first day. Pages may have overlapped or missed a day, so check the export before pruning.", "photo-prune")
         stop()
     }
     const finishedAt = currentDate()
     const exportedAt = formatTime(finishedAt, "Medium")
-    showNotification("Exported {doneCount} rows to {@outDir} at {exportedAt}", "photo-prune")
+    showNotification("Exported {@saved} rows to {@outDir} at {exportedAt}. Select every page in the folder when pruning.", "photo-prune")
 }
 
 if @mode == "prune" {
-    alert("Deleted {doneCount} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+    alert("Deleted {@saved} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
