@@ -287,7 +287,35 @@ repeat p for @maxPages {
                 repeat w for 12 {
                     if @landed == 0 {
                         wait(10)
-                        showNotification("page {delPage}: poll {@w} counting", "trace")
+                        showNotification("page {delPage}: poll {@w} sorted find", "trace")
+                        const sortedPhotos = rawAction("is.workflow.actions.filter.photos", {
+                            "WFContentItemFilter": {
+                                "Value": {
+                                    "WFActionParameterFilterPrefix": 1,
+                                    "WFActionParameterFilterTemplates": [
+                                        {
+                                            "Operator": 0,
+                                            "Property": "Date Taken",
+                                            "Removable": true,
+                                            "Values": {
+                                                "Date": {"$date": "2025-01-01T00:00:00+09:00"},
+                                                "Unit": 4
+                                            }
+                                        }
+                                    ],
+                                    "WFContentPredicateBoundedDate": false
+                                },
+                                "WFSerializationType": "WFContentPredicateTableTemplate"
+                            },
+                            "WFContentItemSortOrder": "Oldest First",
+                            "WFContentItemSortProperty": "Date Taken",
+                            "WFContentItemLimitEnabled": true,
+                            "WFContentItemLimitNumber": 100000
+                        })
+                        showNotification("page {delPage}: poll {@w} sorted found", "trace")
+                        const sortedNow = count(sortedPhotos)
+                        showNotification("page {delPage}: poll {@w} sorted count {sortedNow}", "trace")
+                        showNotification("page {delPage}: poll {@w} plain find", "trace")
                         const leftPhotos = rawAction("is.workflow.actions.filter.photos", {
                             "WFContentItemFilter": {
                                 "Value": {
@@ -308,6 +336,7 @@ repeat p for @maxPages {
                                 "WFSerializationType": "WFContentPredicateTableTemplate"
                             }
                         })
+                        showNotification("page {delPage}: poll {@w} plain found", "trace")
                         const leftNow = count(leftPhotos)
                         @left = leftNow
                         showNotification("page {delPage}: poll {@w} count {leftNow}, want {expectedLeft}", "trace")
