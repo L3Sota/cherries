@@ -12,7 +12,7 @@
 
 // Keep LABEL in step with every Find Photos filter below: it names the export CSV that the prune guard checks.
 const LABEL = "before-2025-01-01"
-const PRUNE_RATIO = 0.5
+const PRUNE_RATIO = 0.75
 const PRUNE_PERCENT = PRUNE_RATIO * 100
 // Per-row cost grows with page size above 250 (1000: 36.3s, 500: 12.2s, 250: 5.2s, 100: 2.1s).
 const CHUNK = 250
