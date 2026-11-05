@@ -331,5 +331,5 @@ if @mode == "export" {
 }
 
 if @mode == "prune" {
-    alert("Deleted {@saved} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
+    showNotification("Deleted {@saved} photos. Empty Albums › Recently Deleted to actually free the space.", "photo-prune")
 }
