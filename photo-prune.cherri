@@ -7,6 +7,7 @@
 #include 'actions/documents'
 #include 'actions/math'
 #include 'actions/photos'
+#include 'actions/sharing'
 #include 'actions/text'
 
 // Keep LABEL in step with every Find Photos filter below: it names the export CSV that the prune guard checks.
@@ -282,7 +283,14 @@ if @mode == "export" {
     if @done == 0 {
         // The cursor is the day the next page starts on, and every saved page is complete.
         const resumeFrom = formatDate(@cursor, "Custom", "yyyy-MM-dd")
-        alert("Saved {@saved} rows in {PAGES_PER_RUN} pages to {@outDir}. To continue, choose \"Step 1: resume export\" with folder {@folderName}, day {resumeFrom}, and page {@pageNo}.", "photo-prune")
+        const resumeDetails = "folder: {@folderName}\nday: {resumeFrom}\npage: {@pageNo}"
+        // A menu rather than an alert, which can't offer a copy button.
+        menu "Saved {@saved} rows in {PAGES_PER_RUN} pages to {@outDir}. To continue, choose \"Step 1: resume export\" with\n{resumeDetails}" {
+            item "Copy resume details":
+                setClipboard(resumeDetails)
+            item "Done":
+                nothing()
+        }
         stop()
     }
     // Counted from this run's first day, so a resumed run checks only the pages it saved.
