@@ -159,14 +159,7 @@ repeat p for @maxPages {
                 @pageEnd = lastDayStart
                 // A single day with CHUNK or more photos becomes one oversized page, or paging would never move on.
                 if firstDay == lastDay {
-                    const nextDay = rawAction("is.workflow.actions.adjustdate", {
-                        "WFDate": "${pageEnd}",
-                        "WFAdjustOperation": "Add",
-                        "WFDuration": {
-                            "Value": {"Magnitude": 1, "Unit": "days"},
-                            "WFSerializationType": "WFQuantityFieldValue"
-                        }
-                    })
+                    const nextDay = adjustDate(lastDayStart, "Add", qty(1, "days"))
                     @pageEnd = nextDay
                 }
                 const dayPage = rawAction("is.workflow.actions.filter.photos", {
